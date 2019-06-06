@@ -185,8 +185,9 @@ $ErrorActionPreference= "Stop";
 	Function PSTelegramBot_ConvertToJson($o) {
 		
 		if(Get-Command ConvertTo-Json -EA "SilentlyContinue"){
-			return PSTelegramBot_EscapeNonUnicodeJson(ConvertTo-Json $o);
+			return PSTelegramBot_EscapeNonUnicodeJson(ConvertTo-Json -Depth 10 $o -Compress);
 		} else {
+			write-verbose "Using Serialize...";
 			PSTelegramBot_LoadJsonEngine
 			$jo=new-object system.web.script.serialization.javascriptSerializer
 			$jo.maxJsonLength=[int32]::maxvalue;
@@ -444,7 +445,7 @@ $ErrorActionPreference= "Stop";
 		
 			if($data -is [hashtable]){
 				write-verbose "Converting input object to json string..."
-				$data = PSTelegramBot_ConvertToJson $data;
+				$data = PSTelegramBot_ConvertToJson $data; 
 			}
 			
 			write-verbose "$($MyInvocation.InvocationName):  json that will be send is: $data"
@@ -829,6 +830,7 @@ $ErrorActionPreference= "Stop";
 			,[string]$chat_id
 			,[string]$text 
 			,[int]$reply_to_message_id = $null
+			,[hashtable]$reply_markup = $null
 		)
 		
 		$token = Get-BotToken -token $token;
@@ -843,11 +845,59 @@ $ErrorActionPreference= "Stop";
 			$Params.add("reply_to_message_id",$reply_to_message_id);
 		}
 		
+		if($reply_markup){
+			$Params.add("reply_markup", $reply_markup);
+		}
+		
 		$APIResponse = PSTelegramBot_CallTelegramURL -Url $URL_API -Data $Params
 		
 		return (PSTelegramBot_TranslateResponseJson $APIResponse);
 	}
-
+	
+	# Implementation of keyboard
+	# https://core.telegram.org/bots/api#sendmessage
+	function New-TelegramReplyKeyboard {
+			param(
+				 [object[]]$keys
+				,[switch]$Resize = $false
+				,[switch]$OneTime = $false
+				,[switch]$Selective = $false
+				
+			)
+			
+			return @{
+				keyboard  			= $keys
+				resize_keyboard		= [bool]$Resize
+				one_time_keyboard	= [bool]$OneTime
+				selective			= [bool]$Selective 
+			}
+	}
+	
+	# Implementation of SendChataction
+	# https://core.telegram.org/bots/api#sendChatAction
+	function Send-TelegramChatAction {
+			[CmdLetBinding()]
+			param(
+				 [string]$token
+				,[string]$chat_id
+				,[string]$action
+				
+			)
+			
+		$token = Get-BotToken -token $token;
+		$URL_API = "https://api.telegram.org/bot$($token)/sendChatAction"
+		
+		$Params = @{
+			chat_id = $chat_id
+			text 	= $text
+			action 	= $action
+		}
+		
+		$APIResponse = PSTelegramBot_CallTelegramURL -Url $URL_API -Data $Params
+		
+		return (PSTelegramBot_TranslateResponseJson $APIResponse);
+	}
+		
 	# Implementation of getFile
 	# https://core.telegram.org/bots/api#getfile
 	function Get-TelegramFile {
@@ -887,6 +937,73 @@ $ErrorActionPreference= "Stop";
 		
 		return (PSTelegramBot_TranslateResponseJson $APIResponse);
 	}
+	
+	
+############### ADDITIONAL IMPLEMENTATIONS
+## Tis is useful to extended telegram capabilities
+
+	#Starts telegram action in async way and keeps sending the action...
+	function Start-TelegramChatAction {
+		param(
+			 $token 
+			,$chat_id
+			,$action
+			,$delay = 5000
+		)
+		
+	
+		
+		$PsEngine = [Powershell]::Create();
+		$Rsp = [RunspaceFactory]::CreateRunspace($Host);
+		[void]($Rsp.Open());
+		$PsEngine.Runspace = $Rsp;
+		
+		$Options = New-Object PsObject -Prop @{
+			chat_id = $chat_id
+			action 	= $action
+			delay 	= $delay
+			token 	= (Get-BotToken $token)
+			_run	= $true
+			_powershell = $PsEngine
+			_AsyncHandler = $null
+			CurrentModule = $MyInvocation.MyCommand.module.path;
+		}
+		
+		
+		
+		[void]$PsEngine.AddScript({
+				param($opts)
+				$ErrorActionPreference = "Stop";
+				import-module $opts.CurrentModule;
+				
+				while($opts._run){
+					$output = Send-TelegramChatAction -token $opts.token -chat_id $opts.chat_id -action $opts.action
+					Start-sleep -m $opts.delay
+				}
+			}).AddArgument(
+				$Options
+			)
+		
+		$Options._AsyncHandler = $PsEngine.BeginInvoke();
+		return $Options
+	}
+
+	function Stop-TelegramChatAction {
+		[CmdLetBinding()]
+		param(
+			$ActionObject
+			,[switch]$Destroy
+		)
+		
+		$ActionObject._run = $false;
+		
+		if($Destroy){
+			$resulsts = $ActionObject._powershell.EndInvoke($ActionObject._AsyncHandler);
+			$ActionObject._powershell.Dispose();
+		}
+	}
+
+
 
 	
 	
